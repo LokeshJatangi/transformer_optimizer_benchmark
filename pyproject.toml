@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "optimizer-truth-assignment"
+name = "transformer-optimizer-benchmark"
 version = "1.0.0"
 description = "Reproducible optimizer and learning-rate experiments for a character Transformer"
 requires-python = ">=3.10"
@@ -15,4 +15,4 @@ addopts = "-q"
 pythonpath = ["."]
 
 [tool.setuptools]
-py-modules = ["optimizer_experiments"]
+py-modules = ["transformer_optimizer_benchmark"]

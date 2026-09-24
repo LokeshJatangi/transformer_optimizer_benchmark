@@ -1,6 +1,6 @@
-# Optimizer truth: Adam, schedules, and width scaling
+# Transformer optimizer benchmark
 
-This repository contains a Colab-first optimizer assignment for a four-layer,
+This repository contains a Colab-first optimizer benchmark for a four-layer,
 four-head nanoGPT-style character Transformer. The full run compares Adam bias
 correction, cosine decay, WSD, and width-dependent learning-rate choices under
 controlled initialization, batches, validation data, and timing.
@@ -8,13 +8,13 @@ controlled initialization, batches, validation data, and timing.
 The measured report is intentionally not pre-populated. A successful T4 run writes
 `results/metrics.json`, CSV/JSON logs, four PNG plots, the retained checkpoint, and
 then regenerates this README strictly from those metrics. Local smoke measurements
-cannot pass the README-generation gate.
+cannot pass the measured-results gate.
 
 ## Files
 
-- [`optimizer_truth_colab.ipynb`](optimizer_truth_colab.ipynb): Colab entry point,
+- [`transformer_optimizer_benchmark_colab.ipynb`](transformer_optimizer_benchmark_colab.ipynb): Colab entry point,
   artifact capture, assertions, and optional push-back workflow.
-- [`optimizer_experiments.py`](optimizer_experiments.py): model, diagnostics,
+- [`transformer_optimizer_benchmark.py`](transformer_optimizer_benchmark.py): model, diagnostics,
   schedulers, tuning, adaptive width sweep, logging, plotting, and report generation.
 - [`tests/`](tests): local arithmetic, determinism, scheduler, aggregation, timing,
   and report-gating tests.
@@ -23,16 +23,16 @@ cannot pass the README-generation gate.
 
 ```bash
 python -m pytest -q
-MPLCONFIGDIR=/tmp/optimizer-mpl python optimizer_experiments.py --profile smoke
+MPLCONFIGDIR=/tmp/optimizer-mpl python transformer_optimizer_benchmark.py --profile smoke
 ```
 
 The smoke run uses synthetic text on CPU and writes only to ignored
-`smoke_results/`. It covers the complete orchestration but is not assignment evidence.
+`smoke_results/`. It covers the complete orchestration but is not benchmark evidence.
 
 ## Colab workflow
 
 1. Push this implementation on branch `colab-results` and open
-   `optimizer_truth_colab.ipynb` in a free Colab T4 runtime.
+   `transformer_optimizer_benchmark_colab.ipynb` in a free Colab T4 runtime.
 2. Set `REPO_URL` in the first code cell and add `GITHUB_TOKEN` to Colab Secrets
    with repository write access. The token is read into process memory only and is
    never printed, written to disk, embedded in the remote URL, or committed.

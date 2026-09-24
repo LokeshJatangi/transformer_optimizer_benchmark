@@ -1,4 +1,4 @@
-"""Colab-first optimizer assignment with auditable timing and result generation.
+"""Colab-first transformer optimizer benchmark with auditable timing and result generation.
 
 `run_full()` is the submission path and refuses to run without a CUDA T4.
 `run_smoke()` exercises the same orchestration on synthetic text and writes only to
@@ -621,9 +621,9 @@ def generate_readme(metrics_path: Path, output_path: Path) -> str:
     components = [r for r in m["runs"] if r["experiment"] != "total_runtime"]
     measured_total = sum(r["duration_seconds"] for r in components)
     expected_total = sum(r["expected_seconds"] for r in components)
-    text = f"""# Optimizer truth: Adam, schedules, and width scaling
+    text = f"""# Transformer optimizer benchmark
 
-[Executed Colab notebook](optimizer_truth_colab.ipynb) · [machine-readable metrics](results/metrics.json) · [run log](results/run_log.csv)
+[Executed Colab notebook](transformer_optimizer_benchmark_colab.ipynb) · [machine-readable metrics](results/metrics.json) · [run log](results/run_log.csv)
 
 All numerical claims below were generated strictly from `results/metrics.json`, after the full internal assertion suite passed. The run used **{m['provenance']['device']}**, fp32, fixed seeds, fixed validation batches, identical candidate initialization/data order, and Tiny Shakespeare with its pinned SHA-256.
 

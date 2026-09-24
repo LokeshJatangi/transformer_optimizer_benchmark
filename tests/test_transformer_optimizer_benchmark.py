@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-import optimizer_experiments as oe
+import transformer_optimizer_benchmark as oe
 
 
 def test_adam_manual_matches_pytorch_float64():
