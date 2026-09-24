@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optimizer-truth-assignment"
+version = "1.0.0"
+description = "Reproducible optimizer and learning-rate experiments for a character Transformer"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4", "numpy>=1.26", "matplotlib>=3.8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+
+[tool.setuptools]
+py-modules = ["optimizer_experiments"]
