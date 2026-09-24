@@ -22,6 +22,29 @@ validation batches, and the same tuning budget on both sides of every comparison
 | Best LR at widths 256 / 512 / 1,024? | `4e-4` / `2e-4` / `1e-4`. |
 | LR to try at width 4,096? | **`2.5e-5`**, with moderate model-reported confidence and substantial extrapolation caveats. |
 
+### What the assignment is testing
+
+The Session 11 notes make the expected standard clear. This is not a checklist of
+unrelated plots; it is one chain of evidence from a gradient to a defensible
+training decision:
+
+1. **Mechanism:** calculate Adam's two state variables, bias corrections, and
+   parameter update transparently enough that PyTorch can be used as an independent
+   check rather than as the source of the answer.
+2. **Early-step behavior:** demonstrate why bias correction and warmup exist, and
+   define numerically what “stops mattering” means instead of deciding by eye.
+3. **Scale relative to the model:** log `||delta W|| / ||W||` per layer, because an
+   absolute update has no meaning without the scale of the weight it moves.
+4. **Schedule behavior under interruption:** define both schedules for 300 steps,
+   stop them at 200, and compare the resulting checkpoints under controlled data,
+   initialization, and tuning. WSD's operational advantage—branching or continuing
+   from its stable phase—should be discussed separately from instantaneous loss.
+5. **Width transfer:** measure how the best LR moves under standard
+   parameterization, mark the empirical minima, extrapolate cautiously, and state
+   uncertainty. Implementing muP or Muon is not required by this assignment.
+6. **Fairness:** tune both sides with the same search space, seeds, validation data,
+   and compute budget before accepting an optimizer or scheduler claim.
+
 ## 1. Adam reproduced by hand and checked against PyTorch
 
 The scalar experiment starts from weight \(w_0=1\), uses
@@ -183,6 +206,14 @@ warmup, so they diverge only when their schedules diverge.
 **Reported warmup boundary: step 10. Warmup stops changing the
 update-to-weight ratio beginning at step 11.**
 
+The session notes give roughly `1e-3` as a healthy large-run ratio heuristic. This
+short benchmark peaks much higher at the endpoint: `0.0367` for the heads,
+`0.0235` for embeddings, and about `0.011–0.015` for the blocks. That does not
+change the mechanically observed warmup boundary, but it warns against treating
+10 steps and LR `0.0012` as a production recipe. The heads also move about two to
+three times more than the blocks, which is exactly the evidence one would use to
+decide whether the output head needs its own LR in a longer run.
+
 ![Cosine update-to-weight ratios](results/relative_updates_cosine.png)
 
 ![WSD update-to-weight ratios](results/relative_updates_wsd.png)
@@ -215,6 +246,12 @@ This comparison is fair within the declared grid, but not definitive: both selec
 peak learning rates lie at the upper edge of the grid, and the final difference is
 from one deterministic seed. Expanding the LR grid and repeating the final
 comparison across seeds remain the strongest follow-up checks.
+
+The choice above answers the assignment's loss-based question. The session notes
+identify a separate systems advantage for WSD: a checkpoint in its stable phase can
+be continued or branched and given a fresh decay later, whereas cosine assumes the
+run horizon in advance. If resumability were the primary requirement, WSD could be
+the operational choice even though cosine has the lower step-200 loss here.
 
 ## 5. Learning-rate sweep across model width
 
@@ -294,6 +331,12 @@ budgets. `train_once()` reseeds before constructing each model; candidate runs u
 the same seed and pre-generated batch sequence; validation uses the same four fixed
 batches. The only intended difference in the final comparison is the scheduler.
 
+For exact comparability, this benchmark applies AdamW weight decay uniformly to the
+model parameters. The full V5 recipe in the session notes recommends excluding
+normalization scales and biases. That is a valid production refinement, but it is
+not one of the assignment's requested comparisons and changing it after collecting
+one side would invalidate the controlled scheduler and width results.
+
 The verified run produced **75 successful timing records** and no failed records.
 CUDA was synchronized around every timed component. The full run took **5m 53.3s**
 on a Tesla T4 and records every candidate, final run, and width/LR/seed point in the
@@ -332,6 +375,52 @@ claims stronger rather than fill a missing artifact:
 - [ ] If those additional runs change a selected configuration, regenerate the
   plots, metrics, retained checkpoint, and this report together.
 
+### Runnable confirmation suite
+
+The follow-up code is now implemented in
+[additional_experiments.py](additional_experiments.py), with a dedicated
+[additional Colab notebook](additional_experiments_colab.ipynb). It never changes
+the verified `results/` directory. A full run writes only to
+`results_additional/` and produces:
+
+- an expanded cosine/WSD grid with peak LRs
+  `[6e-4, 1.2e-3, 2.4e-3, 4.8e-3]`, warmups `[5, 10, 20, 40]`, and three seeds;
+- independently varied initialization and training-data-order seeds, paired fairly
+  across schedules and candidates;
+- 32 held-out batches per seed instead of four;
+- three-seed final losses and mean ± standard-deviation relative-update plots;
+- fully replicated five-rate sweeps at widths 2,048 and 4,096;
+- a retained checkpoint, metrics, CSV/JSON logs, five plots, and generated
+  `SUMMARY.md`;
+- explicit LR/warmup bracketing flags and an explicit `resource_limited` result if
+  width 4,096 cannot fit, rather than silently changing precision or optimizer.
+
+To verify the workflow cheaply before Colab:
+
+```bash
+python additional_experiments.py --smoke
+```
+
+To collect the real evidence:
+
+1. Push the latest `colab-results` branch.
+2. Open `additional_experiments_colab.ipynb` in Colab and select a GPU runtime.
+   More than 16 GiB is preferred. Width 4,096 has 806,703,104 parameters and an
+   estimated 12.02 GiB of persistent fp32 AdamW parameter/gradient/moment state
+   before activations and temporary buffers.
+3. Run all cells. At width 4,096 the runner preserves effective batch 8 using
+   micro-batch 1 and eight accumulation steps, divides each micro-batch loss by the
+   accumulation count, enables activation checkpointing, and disables AdamW's
+   parameter-sized foreach temporaries.
+4. The last cell validates and downloads `results_additional.zip`.
+5. Extract the contained `results_additional/` folder at the repository root. Do
+   not rename it and do not replace the existing `results/` folder.
+
+After the folder is returned, rerun `python -m pytest -q`, review
+`results_additional/SUMMARY.md`, compare every selected minimum with its neighboring
+points and seed variation, then update the conclusions only if the added evidence
+supports the change.
+
 ## Repository contents
 
 - [transformer_optimizer_benchmark.py](transformer_optimizer_benchmark.py): model,
@@ -342,5 +431,9 @@ claims stronger rather than fill a missing artifact:
   timing schema, and full-result gating.
 - [transformer_optimizer_benchmark_colab.ipynb](transformer_optimizer_benchmark_colab.ipynb):
   reproducible T4 workflow without credentials or repository mutation.
+- [additional_experiments.py](additional_experiments.py): expanded multi-seed
+  scheduler and large-width confirmation runner.
+- [additional_experiments_colab.ipynb](additional_experiments_colab.ipynb): isolated
+  Colab workflow that validates and downloads `results_additional/`.
 - [results/](results): metrics, complete logs, four plots, executed notebook,
   run provenance, and the retained cosine checkpoint.

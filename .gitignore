@@ -4,4 +4,5 @@ __pycache__/
 .cache/
 graphify-out/
 smoke_results/
+additional_smoke_results/
 *.pyc

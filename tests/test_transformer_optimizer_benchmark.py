@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 
+import additional_experiments as additional
 import transformer_optimizer_benchmark as oe
 
 
@@ -113,3 +114,44 @@ def test_metrics_validation_rejects_smoke_results(tmp_path):
         pass
     else:
         raise AssertionError("smoke metrics must not pass full-result validation")
+
+
+def test_additional_plan_expands_and_replicates_search():
+    plan = additional.additional_plan()
+    assert plan["seeds"] == [42, 314, 2718]
+    assert max(plan["scheduler_lrs"]) > 1.2e-3
+    assert min(plan["warmups"]) < 10 < max(plan["warmups"])
+    assert set(plan["width_grids"]) == {2048, 4096}
+    assert 2.5e-5 in plan["width_grids"][4096]
+    assert plan["validation_batches"] == 32
+
+
+def test_large_width_memory_estimate_matches_architecture():
+    assert additional.estimated_parameter_count(65, 256, 128) == 3_233_024
+    count = additional.estimated_parameter_count(65, 4096, 128)
+    assert count == 806_703_104
+    assert additional.training_memory_estimate(count) == 16 * count
+
+
+def test_accumulation_preserves_effective_batch_update():
+    data = oe.CharacterData("abcdefghij" * 40)
+    val = oe.CharacterData.batches(data.val, 99, 2, 2, 4)
+    common = dict(width=8, peak_lr=3e-4, warmup=1, steps=2,
+                  planned_steps=2, schedule="warmup_stable",
+                  effective_batch_size=2, context=4, model_seed=7,
+                  data_seed=11, capture_state=True)
+    full = additional.train_controlled(
+        additional.AdditionalTrainConfig(**common, micro_batch_size=2),
+        data, torch.device("cpu"), val,
+    )
+    accumulated = additional.train_controlled(
+        additional.AdditionalTrainConfig(**common, micro_batch_size=1),
+        data, torch.device("cpu"), val,
+    )
+    assert math.isclose(full["final_train_loss"], accumulated["final_train_loss"],
+                        rel_tol=1e-6, abs_tol=1e-6)
+    assert math.isclose(full["final_val_loss"], accumulated["final_val_loss"],
+                        rel_tol=1e-6, abs_tol=1e-6)
+    for name, tensor in full["state_dict"].items():
+        assert torch.allclose(tensor, accumulated["state_dict"][name],
+                              rtol=1e-5, atol=1e-6)
