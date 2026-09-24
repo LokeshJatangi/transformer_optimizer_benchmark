@@ -1,8 +1,9 @@
 """Colab-first transformer optimizer benchmark with auditable timing and result generation.
 
-`run_full()` is the submission path and refuses to run without a CUDA T4.
-`run_smoke()` exercises the same orchestration on synthetic text and writes only to
-`smoke_results/`; its measurements are never accepted by `generate_readme`.
+`run_full()` is the evidence-collection path and refuses to run without a CUDA T4.
+It writes machine-readable metrics, logs, plots, and the retained checkpoint, but
+never edits README.md. `run_smoke()` exercises the same orchestration on synthetic
+text and writes only to `smoke_results/`.
 """
 from __future__ import annotations
 
@@ -584,15 +585,23 @@ def validate_metrics(metrics: dict[str, Any]) -> None:
     assert metrics["provenance"]["result_kind"] == "colab_t4_full"
     assert metrics["provenance"]["device"] and "T4" in metrics["provenance"]["device"].upper()
     assert len(metrics["adam_manual"]["rows"]) == 5
+    assert metrics["adam_manual"]["pytorch_float64_parity"] is True
+    assert len(metrics["adam_bias_correction"]["first_20"]) == 20
+    assert metrics["adam_bias_correction"]["stops_mattering_step"] > 20
     assert metrics["scheduler_comparison"]["planned_steps"] == 300
     assert metrics["scheduler_comparison"]["stopped_at_step"] == 200
     assert set(metrics["width_sweep"]["widths"]) == {"256", "512", "1024"}
     assert all(r["status"] == "ok" for r in metrics["runs"])
     assert all(RunLogger.REQUIRED <= r.keys() for r in metrics["runs"])
+    expected_layers = {"step", "embeddings", "block_0", "block_1", "block_2",
+                       "block_3", "final_norm", "heads"}
     for scheduler in ("cosine", "wsd"):
         assert len(metrics["scheduler_comparison"]["candidates"][scheduler]) == 12
-        layers = metrics["scheduler_comparison"]["finals"][scheduler]["ratio_history"][0]
-        assert set(layers) == {"step", "embeddings", "block_0", "block_1", "block_2", "block_3", "final_norm", "heads"}
+        final = metrics["scheduler_comparison"]["finals"][scheduler]
+        assert len(final["history"]) == 200
+        assert len(final["ratio_history"]) == 200
+        assert all(set(row) == expected_layers for row in final["ratio_history"])
+        assert [row["step"] for row in final["ratio_history"]] == list(range(1, 201))
 
 
 def generate_readme(metrics_path: Path, output_path: Path) -> str:
@@ -751,7 +760,6 @@ def run_pipeline(profile: str, out_dir: Path) -> dict[str, Any]:
         metrics_path.write_text(json.dumps(metrics, indent=2))
         if full:
             validate_metrics(metrics)
-            generate_readme(metrics_path, Path("README.md"))
         # Packaging is gated on all expected plot and log inputs being present.
         assert all((out_dir / name).exists() for name in
                    ("adam_bias_correction.png", "relative_updates_cosine.png",
@@ -775,7 +783,6 @@ def run_pipeline(profile: str, out_dir: Path) -> dict[str, Any]:
     logger.write(out_dir)
     if full:
         validate_metrics(metrics)
-        generate_readme(metrics_path, Path("README.md"))
     return metrics
 
 

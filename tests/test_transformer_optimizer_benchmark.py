@@ -63,8 +63,11 @@ def test_timing_record_schema(tmp_path):
 
 def _full_metrics_fixture():
     first = oe.adam_manual()
-    ratio = [{"step": 1, "embeddings": .1, "block_0": .1, "block_1": .1,
-              "block_2": .1, "block_3": .1, "final_norm": .1, "heads": .1}]
+    ratio = [{"step": step, "embeddings": .1, "block_0": .1, "block_1": .1,
+              "block_2": .1, "block_3": .1, "final_norm": .1, "heads": .1}
+             for step in range(1, 201)]
+    history = [{"step": step, "lr": 3e-4, "train_loss": 5.0}
+               for step in range(1, 201)]
     candidates = [{"lr": 3e-4, "warmup": 20, "train_loss": 5.0, "val_loss": 5.1}] * 12
     width = {str(w): {"empirical_best_lr": 3e-4, "boundary_minimum": False,
                       "observations": [{"lr": 3e-4, "seed": s, "val_loss": 5.0 + s * 0,
@@ -77,16 +80,19 @@ def _full_metrics_fixture():
     return {"provenance": {"result_kind": "colab_t4_full", "device": "Tesla T4",
                             "source_commit": "abc", "started_at": "now", "python": "3.12",
                             "torch": "2.x", "context": 128, "comparison_width": 256},
-            "adam_manual": {"rows": first},
-            "adam_bias_correction": {"stops_mattering_step": 100,
+            "adam_manual": {"rows": first, "pytorch_float64_parity": True},
+            "adam_bias_correction": {"first_20": [{}] * 20,
+                                      "stops_mattering_step": 100,
                                       "definition": "test definition"},
             "scheduler_comparison": {"planned_steps": 300, "stopped_at_step": 200,
                 "candidates": {"cosine": candidates, "wsd": candidates},
                 "best_configurations": {"cosine": {"lr": 3e-4, "warmup": 20},
                                         "wsd": {"lr": 3e-4, "warmup": 20}},
                 "finals": {"cosine": {"final_train_loss": 5.0, "final_val_loss": 5.1,
+                                        "history": history,
                                         "ratio_history": ratio},
                            "wsd": {"final_train_loss": 5.0, "final_val_loss": 5.2,
+                                   "history": history,
                                    "ratio_history": ratio}}, "winner": "cosine"},
             "width_sweep": {"widths": width, "fit": {"exponent": -0.5, "intercept": -5,
                 "r_squared": .95, "predicted_lr_width_4096": 1e-4,
@@ -95,19 +101,15 @@ def _full_metrics_fixture():
             "runs": [run], "timing": {"total_readable": "1m 0s"}}
 
 
-def test_readme_generation_is_metrics_gated(tmp_path):
+def test_metrics_validation_rejects_smoke_results(tmp_path):
     metrics = tmp_path / "metrics.json"
     metrics.write_text(json.dumps(_full_metrics_fixture()))
-    output = tmp_path / "README.md"
-    text = oe.generate_readme(metrics, output)
-    assert text == output.read_text()
-    assert "Tesla T4" in text and "R²=0.9500" in text
+    oe.validate_metrics(json.loads(metrics.read_text()))
     bad = _full_metrics_fixture()
     bad["provenance"]["result_kind"] = "local_cpu_smoke"
-    metrics.write_text(json.dumps(bad))
     try:
-        oe.generate_readme(metrics, output)
+        oe.validate_metrics(bad)
     except AssertionError:
         pass
     else:
-        raise AssertionError("smoke metrics must not generate the submission README")
+        raise AssertionError("smoke metrics must not pass full-result validation")
