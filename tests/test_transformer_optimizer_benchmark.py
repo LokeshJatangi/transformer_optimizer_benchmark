@@ -126,6 +126,53 @@ def test_additional_plan_expands_and_replicates_search():
     assert plan["validation_batches"] == 32
 
 
+def test_additional_parts_cover_full_work_without_overlap():
+    assert additional.ADDITIONAL_PARTS[0:2] == ("scheduler", "width_2048")
+    assert len(additional.ADDITIONAL_PARTS) == 7
+    assert additional.part_width_grids("scheduler") == {}
+    assert additional.part_width_grids("width_2048") == {
+        2048: additional.FULL_WIDTH_GRIDS[2048]
+    }
+    sharded_lrs = [
+        additional.part_width_grids(part)[4096][0]
+        for part in additional.ADDITIONAL_PARTS[2:]
+    ]
+    assert sharded_lrs == additional.FULL_WIDTH_GRIDS[4096]
+    assert len(set(sharded_lrs)) == len(sharded_lrs)
+
+
+def test_width_shards_merge_and_recompute_global_minimum():
+    grid = [1e-5, 2e-5]
+    seeds = [42, 314]
+    capability = {"parameter_count": 10}
+    infos = []
+    for lr, loss in zip(grid, [2.0, 1.0], strict=True):
+        infos.append({
+            "status": "complete",
+            "capability": capability,
+            "observations": [
+                {"lr": lr, "seed": seed, "data_seed": 100_000 + seed,
+                 "train_loss": loss - 0.1, "val_loss": loss}
+                for seed in seeds
+            ],
+        })
+    merged = additional.merge_width_part_results(4096, infos, grid, seeds)
+    assert merged["status"] == "complete"
+    assert len(merged["observations"]) == 4
+    assert merged["best"]["lr"] == 2e-5
+    assert merged["boundary_minimum"] is True
+
+
+def test_width_shard_merge_records_missing_observations():
+    info = {
+        "status": "resource_limited", "reason": "out of memory",
+        "capability": {"parameter_count": 10}, "observations": [],
+    }
+    merged = additional.merge_width_part_results(4096, [info], [1e-5], [42, 314])
+    assert merged["status"] == "resource_limited"
+    assert "2 observations missing" in merged["reason"]
+
+
 def test_large_width_memory_estimate_matches_architecture():
     assert additional.estimated_parameter_count(65, 256, 128) == 3_233_024
     count = additional.estimated_parameter_count(65, 4096, 128)

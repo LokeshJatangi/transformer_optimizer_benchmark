@@ -380,7 +380,9 @@ claims stronger rather than fill a missing artifact:
 The follow-up code is now implemented in
 [additional_experiments.py](additional_experiments.py), with a dedicated
 [additional Colab notebook](additional_experiments_colab.ipynb). It never changes
-the verified `results/` directory. A full run writes only to
+the verified `results/` directory. Because the original combined job can exceed a
+Colab session's practical 3–4 hour window, the real run is split into seven
+independently downloadable parts. The final assembly writes
 `results_additional/` and produces:
 
 - an expanded cosine/WSD grid with peak LRs
@@ -401,20 +403,52 @@ To verify the workflow cheaply before Colab:
 python additional_experiments.py --smoke
 ```
 
-To collect the real evidence:
+To collect the real evidence, run **one row per Colab session**. The estimates are
+planning ranges, not measured results; GPU type and Colab load can change them.
+
+| `PART` value | Work in that job | Planning time |
+|---|---|---:|
+| `scheduler` | 96 tuning runs + 6 final seeded runs | 10–25 min |
+| `width_2048` | 5 LRs × 3 seeds | 35–75 min |
+| `width_4096_lr_01` | LR `1.25e-5` × 3 seeds | 25–50 min |
+| `width_4096_lr_02` | LR `1.767766953e-5` × 3 seeds | 25–50 min |
+| `width_4096_lr_03` | LR `2.5e-5` × 3 seeds | 25–50 min |
+| `width_4096_lr_04` | LR `3.535533906e-5` × 3 seeds | 25–50 min |
+| `width_4096_lr_05` | LR `5e-5` × 3 seeds | 25–50 min |
+
+The total compute is intentionally unchanged—the scientific comparison still has
+the same rates, seeds, batches, and steps—but no single width-4,096 job contains
+more than three training runs.
+
+For each row:
 
 1. Push the latest `colab-results` branch.
 2. Open `additional_experiments_colab.ipynb` in Colab and select a GPU runtime.
    More than 16 GiB is preferred. Width 4,096 has 806,703,104 parameters and an
    estimated 12.02 GiB of persistent fp32 AdamW parameter/gradient/moment state
    before activations and temporary buffers.
-3. Run all cells. At width 4,096 the runner preserves effective batch 8 using
+3. Set the notebook's `PART` value to the row being run and run all cells. At
+   width 4,096 the runner preserves effective batch 8 using
    micro-batch 1 and eight accumulation steps, divides each micro-batch loss by the
    accumulation count, enables activation checkpointing, and disables AdamW's
    parameter-sized foreach temporaries.
-4. The last cell validates and downloads `results_additional.zip`.
-5. Extract the contained `results_additional/` folder at the repository root. Do
-   not rename it and do not replace the existing `results/` folder.
+4. The last cell validates and immediately downloads `<PART>.zip`.
+5. Extract every zip at the repository root. Each contains exactly
+   `results_additional_parts/<PART>/`; do not rename these directories and do not
+   replace the verified `results/` folder.
+
+After all seven directories have been returned, assemble them locally without any
+training:
+
+```bash
+python additional_experiments.py --assemble
+```
+
+The assembler refuses missing parts, source-commit or plan mismatches, conflicting
+duplicate observations, and dataset-hash mismatches. It recomputes the two
+large-width minima over the complete grids, creates all five charts, copies the
+retained scheduler checkpoint, and writes the combined metrics and logs to
+`results_additional/`.
 
 After the folder is returned, rerun `python -m pytest -q`, review
 `results_additional/SUMMARY.md`, compare every selected minimum with its neighboring
@@ -432,8 +466,9 @@ supports the change.
 - [transformer_optimizer_benchmark_colab.ipynb](transformer_optimizer_benchmark_colab.ipynb):
   reproducible T4 workflow without credentials or repository mutation.
 - [additional_experiments.py](additional_experiments.py): expanded multi-seed
-  scheduler and large-width confirmation runner.
+  scheduler and large-width confirmation runner, split-job definitions, and
+  zero-training assembler.
 - [additional_experiments_colab.ipynb](additional_experiments_colab.ipynb): isolated
-  Colab workflow that validates and downloads `results_additional/`.
+  Colab workflow that validates and downloads one selected part at a time.
 - [results/](results): metrics, complete logs, four plots, executed notebook,
   run provenance, and the retained cosine checkpoint.

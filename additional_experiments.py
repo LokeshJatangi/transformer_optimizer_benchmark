@@ -1,10 +1,9 @@
 """Confirmation experiments for the optimizer benchmark.
 
-This module leaves the verified ``results/`` directory untouched and writes a
-separate, downloadable ``results_additional/`` bundle.  The full workflow expands
-and replicates scheduler tuning, increases held-out evaluation coverage, and tests
-the width-4096 learning-rate extrapolation.  A small CPU smoke profile exercises
-the same orchestration without claiming benchmark evidence.
+This module leaves the verified ``results/`` directory untouched.  Long CUDA work
+is split into independently downloadable ``results_additional_parts/`` jobs, then
+assembled without training into ``results_additional/``.  A small CPU smoke
+profile exercises the orchestration without claiming benchmark evidence.
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ import json
 import math
 import os
 import platform
+import shutil
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -34,6 +34,13 @@ FULL_WIDTH_GRIDS = {
     2048: [2.5e-5, 3.5355339059e-5, 5e-5, 7.0710678119e-5, 1e-4],
     4096: [1.25e-5, 1.7677669530e-5, 2.5e-5, 3.5355339059e-5, 5e-5],
 }
+SCHEDULER_PART = "scheduler"
+WIDTH_2048_PART = "width_2048"
+WIDTH_4096_PARTS = {
+    f"width_4096_lr_{index:02d}": learning_rate
+    for index, learning_rate in enumerate(FULL_WIDTH_GRIDS[4096], start=1)
+}
+ADDITIONAL_PARTS = (SCHEDULER_PART, WIDTH_2048_PART, *WIDTH_4096_PARTS)
 ADDITIONAL_PLOTS = (
     "scheduler_tuning_additional.png",
     "scheduler_final_losses_additional.png",
@@ -41,6 +48,17 @@ ADDITIONAL_PLOTS = (
     "relative_updates_wsd_additional.png",
     "width_confirmation_additional.png",
 )
+
+
+def part_width_grids(part: str) -> dict[int, list[float]]:
+    """Return the non-overlapping width sweep assigned to one Colab job."""
+    if part == SCHEDULER_PART:
+        return {}
+    if part == WIDTH_2048_PART:
+        return {2048: list(FULL_WIDTH_GRIDS[2048])}
+    if part in WIDTH_4096_PARTS:
+        return {4096: [WIDTH_4096_PARTS[part]]}
+    raise ValueError(f"unknown additional experiment part: {part}")
 
 
 @dataclass(frozen=True)
@@ -526,7 +544,8 @@ def make_additional_plots(metrics: dict[str, Any], out_dir: Path) -> None:
 
 def validate_additional_metrics(metrics: dict[str, Any]) -> None:
     assert metrics["provenance"]["result_kind"] in {
-        "colab_cuda_additional", "local_cpu_additional_smoke"
+        "colab_cuda_additional", "colab_cuda_additional_assembled",
+        "local_cpu_additional_smoke",
     }
     plan = metrics["plan"]
     expected_candidates = len(plan["scheduler_lrs"]) * len(plan["warmups"]) * len(plan["seeds"])
@@ -585,6 +604,227 @@ def write_summary(metrics: dict[str, Any], out_dir: Path) -> None:
     lines += ["- Treat any boundary minimum or resource-limited width as unfinished evidence.", "",
               "See `run_log.csv` and the PNG plots for the full audit trail."]
     (out_dir / "SUMMARY.md").write_text("\n".join(lines) + "\n")
+
+
+def _runtime_inputs(
+    plan: dict[str, Any], device: torch.device, full_text: bool,
+) -> tuple[base.CharacterData, dict[int, list[torch.Tensor]]]:
+    text = base.load_text(Path(".cache/tinyshakespeare.txt"), full=full_text)
+    data = base.CharacterData(text)
+    validation = {
+        seed: base.CharacterData.batches(
+            data.val, 200_000 + seed, plan["validation_batches"],
+            plan["effective_batch_size"], plan["context"],
+        )
+        for seed in plan["seeds"]
+    }
+    return data, validation
+
+
+def _provenance(result_kind: str, device: torch.device, started_at: str) -> dict[str, Any]:
+    return {
+        "result_kind": result_kind,
+        "device": (torch.cuda.get_device_name(0) if device.type == "cuda" else "CPU smoke"),
+        "started_at": started_at,
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "source_commit": os.environ.get("SOURCE_COMMIT", "uncommitted"),
+        "dataset_sha256": base.DATA_SHA256,
+    }
+
+
+def _write_part_summary(metrics: dict[str, Any], out_dir: Path) -> None:
+    part = metrics["provenance"]["part"]
+    lines = [
+        f"# Additional experiment part: {part}", "",
+        f"Completed in **{metrics['timing']['total_readable']}**.", "",
+        "This is one independently downloadable input to the final assembly step.",
+        "Keep the directory name unchanged under `results_additional_parts/`.",
+    ]
+    if part == SCHEDULER_PART:
+        scheduler = metrics["scheduler_confirmation"]
+        lines += ["", f"Selected scheduler in this part: **{scheduler['winner'].upper()}**."]
+    else:
+        for width, info in metrics["width_confirmation"].items():
+            lines += ["", f"Width {width} status: **{info['status']}**; "
+                      f"completed observations: **{len(info['observations'])}**."]
+    (out_dir / "PART_SUMMARY.md").write_text("\n".join(lines) + "\n")
+
+
+def run_additional_part(
+    part: str, parts_root: Path = Path("results_additional_parts"),
+) -> dict[str, Any]:
+    """Run one bounded CUDA job and persist it independently of every other job."""
+    if part not in ADDITIONAL_PARTS:
+        raise ValueError(f"part must be one of: {', '.join(ADDITIONAL_PARTS)}")
+    assert torch.cuda.is_available(), "additional experiment parts require a CUDA runtime"
+    device = torch.device("cuda")
+    out_dir = parts_root / part
+    if (out_dir / "metrics.json").exists():
+        raise FileExistsError(
+            f"completed part already exists at {out_dir}; select the next part"
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plan = additional_plan()
+    started_at = datetime.now(timezone.utc).isoformat()
+    wall_start = time.perf_counter()
+    data, validation = _runtime_inputs(plan, device, full_text=True)
+    logger = base.RunLogger()
+    metrics: dict[str, Any] = {
+        "provenance": _provenance("colab_cuda_additional_part", device, started_at),
+        "plan": plan,
+    }
+    metrics["provenance"]["part"] = part
+
+    if part == SCHEDULER_PART:
+        scheduler, retained = scheduler_confirmation(
+            plan, data, device, validation, logger, out_dir,
+        )
+        torch.save(retained, out_dir / "retained_model.pt")
+        metrics["scheduler_confirmation"] = scheduler
+        del retained
+    else:
+        part_plan = dict(plan)
+        part_plan["width_grids"] = part_width_grids(part)
+        metrics["width_confirmation"] = width_confirmation(
+            part_plan, data, device, validation, logger, out_dir,
+        )
+    release_cuda()
+    elapsed = time.perf_counter() - wall_start
+    metrics["timing"] = {
+        "total_seconds": elapsed,
+        "total_readable": base.readable_duration(elapsed),
+        "cuda_synchronized": True,
+    }
+    metrics["runs"] = logger.records
+    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    logger.write(out_dir)
+    _write_part_summary(metrics, out_dir)
+    return metrics
+
+
+def merge_width_part_results(
+    width: int, infos: list[dict[str, Any]], grid: list[float], seeds: list[int],
+) -> dict[str, Any]:
+    """Merge width shards and recompute the minimum over the complete LR grid."""
+    if not infos:
+        raise ValueError(f"no part results supplied for width {width}")
+    observations_by_key: dict[tuple[float, int], dict[str, Any]] = {}
+    for info in infos:
+        for row in info.get("observations", []):
+            key = (float(row["lr"]), int(row["seed"]))
+            if key in observations_by_key and observations_by_key[key] != row:
+                raise ValueError(f"conflicting duplicate observation for width {width}: {key}")
+            observations_by_key[key] = row
+    observations = [observations_by_key[key] for key in sorted(observations_by_key)]
+    expected = {(float(lr), int(seed)) for lr in grid for seed in seeds}
+    complete = set(observations_by_key) == expected and all(
+        info["status"] == "complete" for info in infos
+    )
+    merged: dict[str, Any] = {
+        "status": "complete" if complete else "resource_limited",
+        "capability": infos[0]["capability"],
+        "observations": observations,
+    }
+    if complete:
+        summaries = aggregate_rows(observations, ("lr",))
+        best = select_finite_minimum(summaries)
+        merged.update({
+            "summaries": summaries,
+            "best": best,
+            "boundary_minimum": best["lr"] in (min(grid), max(grid)),
+        })
+    else:
+        missing = sorted(expected - set(observations_by_key))
+        reasons = sorted({info.get("reason", "incomplete shard") for info in infos
+                          if info["status"] != "complete"})
+        merged["reason"] = (
+            f"incomplete split sweep: {len(missing)} observations missing; "
+            + "; ".join(reasons or ["one or more shards incomplete"])
+        )
+    return merged
+
+
+def assemble_additional_parts(
+    parts_root: Path = Path("results_additional_parts"),
+    out_dir: Path = Path("results_additional"),
+) -> dict[str, Any]:
+    """Assemble all downloaded parts without rerunning any training."""
+    part_metrics: dict[str, dict[str, Any]] = {}
+    expected_plan = json.loads(json.dumps(additional_plan()))
+    for part in ADDITIONAL_PARTS:
+        metrics_path = parts_root / part / "metrics.json"
+        if not metrics_path.exists():
+            raise FileNotFoundError(f"missing completed part: {metrics_path}")
+        metrics = json.loads(metrics_path.read_text())
+        if metrics["provenance"].get("part") != part:
+            raise ValueError(f"part identity mismatch in {metrics_path}")
+        if metrics["plan"] != expected_plan:
+            raise ValueError(f"experiment plan mismatch in {metrics_path}")
+        part_metrics[part] = metrics
+
+    width_2048 = part_metrics[WIDTH_2048_PART]["width_confirmation"]["2048"]
+    width_4096_infos = [
+        part_metrics[part]["width_confirmation"]["4096"]
+        for part in WIDTH_4096_PARTS
+    ]
+    widths = {
+        "2048": merge_width_part_results(
+            2048, [width_2048], FULL_WIDTH_GRIDS[2048], FULL_SEEDS,
+        ),
+        "4096": merge_width_part_results(
+            4096, width_4096_infos, FULL_WIDTH_GRIDS[4096], FULL_SEEDS,
+        ),
+    }
+    scheduler = part_metrics[SCHEDULER_PART]["scheduler_confirmation"]
+    source_commits = sorted({
+        metrics["provenance"]["source_commit"] for metrics in part_metrics.values()
+    })
+    if len(source_commits) != 1:
+        raise ValueError(f"source commits differ across experiment parts: {source_commits}")
+    dataset_hashes = {metrics["provenance"]["dataset_sha256"]
+                      for metrics in part_metrics.values()}
+    if len(dataset_hashes) != 1:
+        raise ValueError("dataset hashes differ across experiment parts")
+    runs = [run for part in ADDITIONAL_PARTS for run in part_metrics[part]["runs"]]
+    total_seconds = sum(metrics["timing"]["total_seconds"]
+                        for metrics in part_metrics.values())
+    metrics = {
+        "provenance": {
+            "result_kind": "colab_cuda_additional_assembled",
+            "device": sorted({metrics["provenance"]["device"]
+                              for metrics in part_metrics.values()}),
+            "assembled_at": datetime.now(timezone.utc).isoformat(),
+            "source_commit": source_commits[0],
+            "dataset_sha256": dataset_hashes.pop(),
+            "parts": list(ADDITIONAL_PARTS),
+        },
+        "plan": additional_plan(),
+        "scheduler_confirmation": scheduler,
+        "width_confirmation": widths,
+        "runs": runs,
+        "timing": {
+            "total_seconds": total_seconds,
+            "total_readable": base.readable_duration(total_seconds),
+            "cuda_synchronized": True,
+            "assembled_from_parts": True,
+        },
+    }
+    metrics["scaling_fit"] = scaling_fit(widths)
+    validate_additional_metrics(metrics)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    make_additional_plots(metrics, out_dir)
+    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    logger = base.RunLogger()
+    logger.records = runs
+    logger.write(out_dir)
+    write_summary(metrics, out_dir)
+    source_checkpoint = parts_root / SCHEDULER_PART / "retained_model.pt"
+    if not source_checkpoint.exists():
+        raise FileNotFoundError(f"missing retained scheduler checkpoint: {source_checkpoint}")
+    shutil.copy2(source_checkpoint, out_dir / "retained_model.pt")
+    assert all((out_dir / filename).exists() for filename in ADDITIONAL_PLOTS)
+    return metrics
 
 
 def run_additional(smoke: bool = False, out_dir: Path | None = None) -> dict[str, Any]:
@@ -647,17 +887,47 @@ def run_additional(smoke: bool = False, out_dir: Path | None = None) -> dict[str
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--smoke", action="store_true", help="run a small CPU orchestration check")
+    parser = argparse.ArgumentParser(
+        description="Run one additional experiment part, assemble parts, or run the CPU smoke test."
+    )
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--smoke", action="store_true",
+                        help="run a small CPU orchestration check")
+    action.add_argument("--part", choices=ADDITIONAL_PARTS,
+                        help="run one bounded CUDA experiment")
+    action.add_argument("--assemble", action="store_true",
+                        help="merge all completed parts without training")
+    parser.add_argument("--parts-root", type=Path, default=Path("results_additional_parts"),
+                        help="directory containing independently downloaded parts")
+    parser.add_argument("--output", type=Path, default=Path("results_additional"),
+                        help="assembled output directory")
     args = parser.parse_args()
-    metrics = run_additional(smoke=args.smoke)
-    print(json.dumps({
-        "kind": metrics["provenance"]["result_kind"],
-        "duration": metrics["timing"]["total_readable"],
-        "winner": metrics["scheduler_confirmation"]["winner"],
-        "width_status": {width: info["status"]
-                         for width, info in metrics["width_confirmation"].items()},
-    }, indent=2))
+    if args.part:
+        metrics = run_additional_part(args.part, args.parts_root)
+        print(json.dumps({
+            "part": args.part,
+            "duration": metrics["timing"]["total_readable"],
+            "output": str(args.parts_root / args.part),
+        }, indent=2))
+    elif args.assemble:
+        metrics = assemble_additional_parts(args.parts_root, args.output)
+        print(json.dumps({
+            "kind": metrics["provenance"]["result_kind"],
+            "duration": metrics["timing"]["total_readable"],
+            "winner": metrics["scheduler_confirmation"]["winner"],
+            "width_status": {width: info["status"]
+                             for width, info in metrics["width_confirmation"].items()},
+            "output": str(args.output),
+        }, indent=2))
+    else:
+        metrics = run_additional(smoke=True)
+        print(json.dumps({
+            "kind": metrics["provenance"]["result_kind"],
+            "duration": metrics["timing"]["total_readable"],
+            "winner": metrics["scheduler_confirmation"]["winner"],
+            "width_status": {width: info["status"]
+                             for width, info in metrics["width_confirmation"].items()},
+        }, indent=2))
 
 
 if __name__ == "__main__":
